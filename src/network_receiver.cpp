@@ -7,6 +7,8 @@
 #include <cstring>
 #include <iostream>
 
+#include "cpu_utils.hpp"
+
 #if defined(__x86_64__)
 #include <immintrin.h>
 #endif
@@ -64,6 +66,8 @@ void NetworkReceiver::stop() {
 }
 
 void NetworkReceiver::receive_loop() {
+    pin_thread_to_core(1);
+
     struct mmsghdr msgs[NETWORK_BATCH_SIZE];
     struct iovec iovecs[NETWORK_BATCH_SIZE];
     IngestOrderCommand packets[NETWORK_BATCH_SIZE];
