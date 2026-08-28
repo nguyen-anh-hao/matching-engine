@@ -1,30 +1,45 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
-#include <string>
 
-enum class Side : char { BUY = 'B', SELL = 'S' };
+// Quy ước Fixed-point: Giá $125.50 -> 12550 ticks (nhân hệ số 100)
+using Price = uint32_t;
+using Quantity = uint32_t;
+using OrderId = uint64_t;
 
-enum class OrderType : char { LIMIT = 'L', MARKET = 'M' };
+constexpr Price MIN_PRICE = 1;
+constexpr Price MAX_PRICE = 100'000;  // Hỗ trợ dải giá từ $0.01 đến $1000.00
+constexpr size_t MAX_ORDERS_PER_BOOK = 1'000'000;
 
-enum class OrderStatus { NEW, PARTIALLY_FILLED, FILLED, CANCELLED, REJECTED };
+enum class Side : uint8_t { BUY = 0, SELL = 1 };
 
-struct Order {
-    uint64_t order_id;
+// Node nằm trong Object Pool (Intrusive Linked List)
+struct alignas(32) PoolOrder {
+    OrderId order_id;
     uint64_t account_id;
-    uint32_t symbol_id;
+    Price price;
+    Quantity remaining_qty;
     Side side;
-    double price;
-    uint32_t initial_quantity;
-    uint32_t remaining_quantity;
-    uint64_t timestamp_ns;
+
+    // Con trỏ nội bộ dùng index thay vì raw pointer để tiết kiệm RAM và thân thiện với cache
+    int32_t prev_idx{-1};
+    int32_t next_idx{-1};
 };
 
-struct Trade {
-    uint64_t trade_id;
-    uint32_t symbol_id;
-    uint64_t maker_order_id;
-    uint64_t taker_order_id;
-    double price;
-    uint32_t quantity;
-    uint64_t timestamp_ns;
+// Lệnh gửi từ Network/Client vào Engine
+struct alignas(64) IngestOrderCommand {
+    enum class Type : uint8_t { NEW, CANCEL } type;
+    OrderId order_id;
+    uint64_t account_id;
+    Side side;
+    Price price;
+    Quantity quantity;
+};
+
+// Kết quả khớp lệnh
+struct TradeEvent {
+    OrderId maker_id;
+    OrderId taker_id;
+    Price match_price;
+    Quantity match_qty;
 };
