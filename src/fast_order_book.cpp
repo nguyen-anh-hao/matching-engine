@@ -56,7 +56,7 @@ void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<TradeEv
             int32_t next_idx = maker.next_idx;
 
             Quantity match_qty = std::min(remaining, maker.remaining_qty);
-            out_trades.push_back({maker.order_id, cmd.order_id, best_ask_, match_qty});
+            out_trades.push_back({maker.order_id, cmd.order_id, best_ask_, match_qty, 0});
 
             remaining -= match_qty;
             maker.remaining_qty -= match_qty;
@@ -107,7 +107,7 @@ void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<TradeE
             int32_t next_idx = maker.next_idx;
 
             Quantity match_qty = std::min(remaining, maker.remaining_qty);
-            out_trades.push_back({maker.order_id, cmd.order_id, best_bid_, match_qty});
+            out_trades.push_back({maker.order_id, cmd.order_id, best_bid_, match_qty, 0});
 
             remaining -= match_qty;
             maker.remaining_qty -= match_qty;
