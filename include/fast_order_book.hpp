@@ -15,12 +15,12 @@ public:
     FastOrderBook();
 
     // Khớp lệnh trực tiếp không qua mutex
-    void process_order(const IngestOrderCommand& cmd, std::vector<TradeEvent>& out_trades);
+    void process_order(const IngestOrderCommand& cmd, std::vector<Trade>& out_trades);
     bool cancel_order(OrderId order_id, Price price, Side side);
 
 private:
-    void match_buy(const IngestOrderCommand& cmd, std::vector<TradeEvent>& out_trades);
-    void match_sell(const IngestOrderCommand& cmd, std::vector<TradeEvent>& out_trades);
+    void match_buy(const IngestOrderCommand& cmd, std::vector<Trade>& out_trades);
+    void match_sell(const IngestOrderCommand& cmd, std::vector<Trade>& out_trades);
 
     void add_to_book(int32_t order_idx, Price price, Side side);
     void remove_from_book(int32_t order_idx, Price price, Side side);

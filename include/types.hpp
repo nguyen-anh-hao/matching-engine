@@ -14,12 +14,12 @@ constexpr size_t MAX_ORDERS_PER_BOOK = 1'000'000;
 enum class Side : uint8_t { BUY = 0, SELL = 1 };
 
 // Node nằm trong Object Pool (Intrusive Linked List)
-struct alignas(32) PoolOrder {
+struct alignas(32) Order {
     OrderId order_id;
     uint64_t account_id;
+    Side side;
     Price price;
     Quantity remaining_qty;
-    Side side;
 
     // Con trỏ nội bộ dùng index thay vì raw pointer để tiết kiệm RAM và thân thiện với cache
     int32_t prev_idx{-1};
@@ -37,7 +37,7 @@ struct alignas(64) IngestOrderCommand {
 };
 
 // Kết quả khớp lệnh
-struct TradeEvent {
+struct Trade {
     OrderId maker_id;
     OrderId taker_id;
     Price match_price;

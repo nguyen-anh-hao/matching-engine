@@ -17,7 +17,7 @@ constexpr size_t QUEUE_SIZE = 131072;  // 2^17
 int main() {
     SpscQueue<IngestOrderCommand, QUEUE_SIZE> queue;
     FastOrderBook order_book;
-    std::vector<TradeEvent> trade_sink;
+    std::vector<Trade> trade_sink;
     trade_sink.reserve(1024);
 
     std::cout << "Starting Phase 2 Optimized Benchmark with " << TOTAL_TEST_ORDERS

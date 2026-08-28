@@ -9,7 +9,7 @@ FastOrderBook::FastOrderBook() {
 
 void FastOrderBook::add_to_book(int32_t order_idx, Price price, Side side) {
     PriceLevel& level = (side == Side::BUY) ? bids_[price] : asks_[price];
-    PoolOrder& order = pool_.get(order_idx);
+    Order& order = pool_.get(order_idx);
 
     order.prev_idx = level.tail_idx;
     order.next_idx = -1;
@@ -25,7 +25,7 @@ void FastOrderBook::add_to_book(int32_t order_idx, Price price, Side side) {
 
 void FastOrderBook::remove_from_book(int32_t order_idx, Price price, Side side) {
     PriceLevel& level = (side == Side::BUY) ? bids_[price] : asks_[price];
-    PoolOrder& order = pool_.get(order_idx);
+    Order& order = pool_.get(order_idx);
 
     if (order.prev_idx != -1) {
         pool_.get(order.prev_idx).next_idx = order.next_idx;
@@ -43,7 +43,7 @@ void FastOrderBook::remove_from_book(int32_t order_idx, Price price, Side side) 
     pool_.deallocate(order_idx);
 }
 
-void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<TradeEvent>& out_trades) {
+void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<Trade>& out_trades) {
     Quantity remaining = cmd.quantity;
 
     // Quét trực tiếp từ Best Ask lên
@@ -52,7 +52,7 @@ void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<TradeEv
         int32_t curr_idx = level.head_idx;
 
         while (remaining > 0 && curr_idx != -1) {
-            PoolOrder& maker = pool_.get(curr_idx);
+            Order& maker = pool_.get(curr_idx);
             int32_t next_idx = maker.next_idx;
 
             Quantity match_qty = std::min(remaining, maker.remaining_qty);
@@ -79,7 +79,7 @@ void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<TradeEv
     if (remaining > 0) {
         int32_t new_idx = pool_.allocate();
         if (new_idx != -1) {
-            PoolOrder& ord = pool_.get(new_idx);
+            Order& ord = pool_.get(new_idx);
             ord.order_id = cmd.order_id;
             ord.account_id = cmd.account_id;
             ord.price = cmd.price;
@@ -94,7 +94,7 @@ void FastOrderBook::match_buy(const IngestOrderCommand& cmd, std::vector<TradeEv
     }
 }
 
-void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<TradeEvent>& out_trades) {
+void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<Trade>& out_trades) {
     Quantity remaining = cmd.quantity;
 
     // Quét trực tiếp từ Best Bid xuống
@@ -103,7 +103,7 @@ void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<TradeE
         int32_t curr_idx = level.head_idx;
 
         while (remaining > 0 && curr_idx != -1) {
-            PoolOrder& maker = pool_.get(curr_idx);
+            Order& maker = pool_.get(curr_idx);
             int32_t next_idx = maker.next_idx;
 
             Quantity match_qty = std::min(remaining, maker.remaining_qty);
@@ -128,7 +128,7 @@ void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<TradeE
     if (remaining > 0) {
         int32_t new_idx = pool_.allocate();
         if (new_idx != -1) {
-            PoolOrder& ord = pool_.get(new_idx);
+            Order& ord = pool_.get(new_idx);
             ord.order_id = cmd.order_id;
             ord.account_id = cmd.account_id;
             ord.price = cmd.price;
@@ -144,7 +144,7 @@ void FastOrderBook::match_sell(const IngestOrderCommand& cmd, std::vector<TradeE
 }
 
 void FastOrderBook::process_order(const IngestOrderCommand& cmd,
-                                  std::vector<TradeEvent>& out_trades) {
+                                  std::vector<Trade>& out_trades) {
     if (cmd.side == Side::BUY) {
         match_buy(cmd, out_trades);
     } else {
