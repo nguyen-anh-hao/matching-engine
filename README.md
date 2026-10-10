@@ -49,3 +49,4 @@ docker run -p 9001:9001 matching-engine:local
 | **v1.1.0** | **gRPC / Binary Transport** | Replace HTTP server with asynchronous gRPC server (`grpc++`) using completion queues. Eliminate JSON parsing overhead. |
 | **v1.2.0** | **Cache-Locality & Lock-Free Structures** | Refactor price-level index from `std::map`/pointer-based tree to contiguous array / cache-aligned ring buffers (`folly::MPMCQueue` or LMAX Disruptor pattern). Eliminate dynamic heap allocation (`malloc`/`new`) on the hot path via custom arena allocators. Target: P99 < 15 microseconds. |
 | **v2.0.0** | **Deterministic Replication & Kernel Bypass** | Integrate Raft/Aeron cluster consensus for active-passive hot-failover without state loss. Implement POSIX shared memory (`shm_open`) or Solarflare EF_VI / DPDK kernel bypass for sub-microsecond tick-to-trade latency. |
+
