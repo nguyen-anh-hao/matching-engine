@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim AS build
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends g++ cmake make && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends g++ cmake make ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY . .
 RUN cmake -B build -S . && cmake --build build -j

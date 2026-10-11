@@ -10,6 +10,8 @@
 #include <string>
 #include <thread>
 
+#include <spdlog/spdlog.h>
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -156,7 +158,10 @@ void HttpServer::run() {
 #endif
 
     sock_t listen_sock = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_sock == BAD_SOCKET) return;
+    if (listen_sock == BAD_SOCKET) {
+        SPDLOG_ERROR("socket() failed");
+        return;
+    }
     listen_fd_ = static_cast<intptr_t>(listen_sock);
 
     int yes = 1;
@@ -168,10 +173,12 @@ void HttpServer::run() {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port_);
     if (::bind(listen_sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCK_ERR) {
+        SPDLOG_ERROR("bind() failed on :{}", port_);
         closesocket(listen_sock);
         return;
     }
     if (::listen(listen_sock, 1024) == SOCK_ERR) {
+        SPDLOG_ERROR("listen() failed");
         closesocket(listen_sock);
         return;
     }
@@ -184,7 +191,10 @@ void HttpServer::run() {
         socklen_t clen = sizeof(client);
 #endif
         sock_t csock = ::accept(listen_sock, reinterpret_cast<sockaddr*>(&client), &clen);
-        if (csock == BAD_SOCKET) continue;
+        if (csock == BAD_SOCKET) {
+            SPDLOG_WARN("accept() failed");
+            continue;
+        }
 
         std::thread([this, csock]() {
         std::string req;

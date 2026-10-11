@@ -9,6 +9,14 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+# spdlog (header-only, async-capable) for structured, non-blocking logging.
+include(FetchContent)
+FetchContent_Declare(
+    spdlog
+    URL https://github.com/gabime/spdlog/archive/refs/tags/v1.14.1.tar.gz
+)
+FetchContent_MakeAvailable(spdlog)
+
 add_library(engine_core
     src/order_book.cpp
     src/engine.cpp
@@ -21,7 +29,7 @@ add_executable(matching-engine
     src/main.cpp
     src/server.cpp
 )
-target_link_libraries(matching-engine PRIVATE engine_core Threads::Threads)
+target_link_libraries(matching-engine PRIVATE engine_core Threads::Threads spdlog::spdlog)
 
 if(WIN32)
     target_link_libraries(matching-engine PRIVATE ws2_32)
