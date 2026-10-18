@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +34,12 @@ using sock_t = int;
 namespace exchange {
 
 namespace {
+
+constexpr uint64_t kLatencyBoundsNs[] = {
+    100000ULL, 250000ULL, 500000ULL, 1000000ULL, 2500000ULL, 5000000ULL,
+    10000000ULL, 25000000ULL, 50000000ULL, 100000000ULL, 250000000ULL,
+    500000000ULL, 1000000000ULL
+};
 
 std::string json_escape(const std::string& s) {
     std::string out;
@@ -138,10 +145,10 @@ bool send_all(sock_t s, const std::string& data) {
     return true;
 }
 
-void http_response(sock_t s, int code, const std::string& body) {
+void http_response(sock_t s, int code, const std::string& body, const char* content_type = "application/json") {
     std::ostringstream h;
-    h << "HTTP/1.1 " << code << " " << (code == 200 ? "OK" : "Bad Request") << "\r\n"
-      << "Content-Type: application/json\r\n"
+    h << "HTTP/1.1 " << code << " " << (code == 200 ? "OK" : "Error") << "\r\n"
+      << "Content-Type: " << content_type << "\r\n"
       << "Content-Length: " << body.size() << "\r\n"
       << "Connection: close\r\n"
       << "\r\n";
@@ -240,8 +247,37 @@ void HttpServer::run() {
 
         std::string out;
         int code = 200;
+        std::string content_type = "application/json";
 
-        if (path == "/health") {
+        if (path == "/metrics" && method == "GET") {
+            content_type = "text/plain; version=0.0.4; charset=utf-8";
+            std::ostringstream m;
+            m << "# HELP trading_matching_orders_total Orders submitted.\n"
+              << "# TYPE trading_matching_orders_total counter\n"
+              << "trading_matching_orders_total " << orders_placed_.load(std::memory_order_relaxed) << "\n"
+              << "# HELP trading_matching_trades_total Trades executed.\n"
+              << "# TYPE trading_matching_trades_total counter\n"
+              << "trading_matching_trades_total " << trades_executed_.load(std::memory_order_relaxed) << "\n"
+              << "# HELP trading_matching_cancels_total Cancels accepted.\n"
+              << "# TYPE trading_matching_cancels_total counter\n"
+              << "trading_matching_cancels_total " << cancels_.load(std::memory_order_relaxed) << "\n"
+              << "# HELP trading_matching_errors_total Rejected/error orders.\n"
+              << "# TYPE trading_matching_errors_total counter\n"
+              << "trading_matching_errors_total " << errors_.load(std::memory_order_relaxed) << "\n"
+              << "# HELP trading_matching_latency_seconds Matching latency.\n"
+              << "# TYPE trading_matching_latency_seconds histogram\n";
+            for (size_t i = 0; i < kLatencyBuckets; ++i) {
+                m << "trading_matching_latency_seconds_bucket{le=\"" << (kLatencyBoundsNs[i] / 1e9)
+                  << "\"} " << latency_buckets_[i].load(std::memory_order_relaxed) << "\n";
+            }
+            m << "trading_matching_latency_seconds_bucket{le=\"+Inf\"} "
+              << latency_count_.load(std::memory_order_relaxed) << "\n"
+              << "trading_matching_latency_seconds_sum "
+              << (latency_sum_ns_.load(std::memory_order_relaxed) / 1e9) << "\n"
+              << "trading_matching_latency_seconds_count "
+              << latency_count_.load(std::memory_order_relaxed) << "\n";
+            out = m.str();
+        } else if (path == "/health") {
             out = "{\"status\":\"ok\"}";
         } else if (path == "/orders" && method == "POST") {
             auto obj = parse_json_object(body);
@@ -261,9 +297,23 @@ void HttpServer::run() {
             oreq.client_order_id = obj["client_order_id"];
 
             PlaceResult r;
+            const auto started = std::chrono::steady_clock::now();
             {
                 std::lock_guard<std::mutex> lock(engine_mutex_);
                 r = engine_.place_order(oreq);
+            }
+            const auto elapsed_ns = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - started).count());
+            orders_placed_.fetch_add(1, std::memory_order_relaxed);
+            trades_executed_.fetch_add(r.trades.size(), std::memory_order_relaxed);
+            if (!r.accepted) errors_.fetch_add(1, std::memory_order_relaxed);
+            latency_sum_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
+            latency_count_.fetch_add(1, std::memory_order_relaxed);
+            for (size_t i = 0; i < kLatencyBuckets; ++i) {
+                if (elapsed_ns <= kLatencyBoundsNs[i]) {
+                    latency_buckets_[i].fetch_add(1, std::memory_order_relaxed);
+                }
             }
             out = "{\"accepted\":" + std::string(r.accepted ? "true" : "false") +
                   ",\"order_id\":" + std::to_string(r.order_id) +
@@ -291,6 +341,8 @@ void HttpServer::run() {
                 std::lock_guard<std::mutex> lock(engine_mutex_);
                 ok = engine_.cancel_order(id, sym);
             }
+            if (ok) cancels_.fetch_add(1, std::memory_order_relaxed);
+            else errors_.fetch_add(1, std::memory_order_relaxed);
             out = ok ? "{\"success\":true}" : "{\"success\":false}";
         } else if (path == "/book" && method == "GET") {
             std::string sym = query_param(qs, "symbol");
@@ -327,7 +379,7 @@ void HttpServer::run() {
             out = "{\"error\":\"not_found\"}";
         }
 
-        http_response(csock, code, out);
+        http_response(csock, code, out, content_type.c_str());
         closesocket(csock);
         }).detach();
     }
