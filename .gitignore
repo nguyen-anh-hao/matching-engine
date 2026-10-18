@@ -11,3 +11,5 @@ bin/
 .vscode/
 .DS_Store
 
+
+.env

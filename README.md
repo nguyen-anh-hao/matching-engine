@@ -1,52 +1,37 @@
-# Matching Engine (`matching-engine`)
+# matching-engine
 
-> **Ultra-Low-Latency Order Matching Core** written in modern C++ (C++20). Deterministic in-memory price-time priority (FIFO) execution.
+## Purpose
 
----
+The deterministic order matching core: it maintains the live limit order book per symbol and turns incoming orders into trades. It is the only stateful service by design, because the book itself is the authoritative state. It has no database, no disk writes and no durable history of its own.
 
-## 1. Primary Responsibility
-The Matching Engine maintains the live Limit Order Book (LOB) for active instruments. It executes incoming limit and market orders deterministically, computes trade fills, updates resting book depth, and broadcasts execution reports.
+## Domain knowledge
 
-**Rule Zero:** The engine performs **ZERO disk I/O, ZERO database interactions, and ZERO blocking syscalls** on the critical matching path.
+Prices and quantities are signed 64-bit fixed-point integers scaled by one hundred million, so price comparison is an integer comparison and rounding never enters the matching path. Orders match best price first and, within a price level, oldest first, which is strict price-time priority. A limit order never trades through its limit, while a market order accepts any available price.
 
----
+Self-trade prevention skips resting orders that belong to the same account instead of cancelling them, so an aggressive order can cross its own liquidity without generating a trade. Good-till-cancelled orders rest after partial execution, immediate-or-cancel orders drop the remainder, and fill-or-kill orders are rejected unless the book can fill them completely before any trade occurs. A trade always pairs one resting maker with one incoming taker, and the maker's price sets the execution price.
 
-## 2. Boundaries & I/O
-- **Ingress (Orders in):** Accepts order requests from `api-gateway` (or dedicated Risk gateway).
-- **Egress (Trades out):** Emits `ExecutionReport` (fills, partial fills, cancels) to `clearing-settlement` and `api-gateway`.
-- **Contract Reference:** `proto/engine/order_book.proto` & `proto/engine/execution_report.proto`.
+Because the engine keeps no client order identifier index and exposes no recovery query, a caller cannot ask it whether an order exists after a crash. Its only durable knowledge is what its callers decided to persist elsewhere. The book and ticker endpoints are read-only projections of live memory, not history.
 
----
+## Decisions and consequences
 
-## 3. Quick Start (Build & Test)
+**Single-writer in-memory engine.** One process owns the book and applies orders sequentially, which removes locking and makes execution deterministic. The cost is that replicas cannot be scaled horizontally and a second replica would silently split the book.
 
-### Prerequisites
-- CMake 3.20+
-- Modern C++ Compiler (`gcc-12+` or `clang-15+` or MSVC 2022)
+**Price-time priority with level queues.** Fairness and predictability come before raw throughput. The current price index uses ordered maps, which is correct but cache-unfriendly; a contiguous price ladder is the planned replacement.
 
-```bash
-# Configure and build
-cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+**Integer fixed-point arithmetic.** Monetary comparisons stay exact and fast at the cost of conversion at every boundary. Any component that reintroduces floating point into prices breaks the guarantee.
 
-# Run native unit tests & benchmarks
-cd build && ctest --output-on-failure
-```
+**No persistence on the hot path.** Avoiding disk and database calls keeps latency predictable, but a crash loses the book. High availability must come from snapshot and replay, not from a shared database.
 
-### Run with Docker (Isolated)
-```bash
-docker build -t matching-engine:local .
-docker run -p 9001:9001 matching-engine:local
-```
+## Operations and known limits
 
----
+The engine must run with exactly one active writer; two replicas produce two different books and inconsistent fills. The health and metrics endpoints serve orchestration, while the book and ticker endpoints serve read-only introspection. It performs no authentication of its own and assumes it is reachable only on the internal network.
 
-## 4. Engineering Roadmap (Hardware & Latency Optimization)
+Matching is fully in memory, so memory grows with the number of resting orders and the book disappears on restart. There is no order-query API, no client-order-id deduplication and no replay endpoint; those absences are intentional and shape how callers handle unknown outcomes. Build and tests run through CMake, the binary listens on port 9001 by default, and the container exposes the same port.
 
-| Version | Phase | Target Metric & Engineering Problem |
-| :--- | :--- | :--- |
-| **v1.0.0** *(Current)* | **Functional Baseline** | In-memory Price-Time Priority LOB. HTTP REST adapter for end-to-end prototyping. Latency ~ 200–500 microseconds. |
-| **v1.1.0** | **gRPC / Binary Transport** | Replace HTTP server with asynchronous gRPC server (`grpc++`) using completion queues. Eliminate JSON parsing overhead. |
-| **v1.2.0** | **Cache-Locality & Lock-Free Structures** | Refactor price-level index from `std::map`/pointer-based tree to contiguous array / cache-aligned ring buffers (`folly::MPMCQueue` or LMAX Disruptor pattern). Eliminate dynamic heap allocation (`malloc`/`new`) on the hot path via custom arena allocators. Target: P99 < 15 microseconds. |
-| **v2.0.0** | **Deterministic Replication & Kernel Bypass** | Integrate Raft/Aeron cluster consensus for active-passive hot-failover without state loss. Implement POSIX shared memory (`shm_open`) or Solarflare EF_VI / DPDK kernel bypass for sub-microsecond tick-to-trade latency. |
+## Future direction
 
+Business: no new product capabilities are planned here; the engine stays a pure execution primitive.
+
+Technical: gRPC and binary transport, cache-local price ladders with lock-free queues, and removal of hot-path allocation. Active-passive replication with deterministic snapshots is the intended path to high availability.
+
+Boundaries: risk and settlement remain outside the engine, and the current HTTP adapter is expected to disappear once the binary transport lands.

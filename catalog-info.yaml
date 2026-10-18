@@ -1,0 +1,13 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: matching-engine
+  description: Deterministic single-writer price-time priority order book.
+  annotations:
+    github.com/project-slug: nguyen-anh-hao/matching-engine
+  tags: [cpp, matching, in-memory]
+spec:
+  type: service
+  lifecycle: experimental
+  owner: nguyen-anh-hao
+  system: trading-exchange
