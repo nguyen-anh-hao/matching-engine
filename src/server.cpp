@@ -204,6 +204,12 @@ void HttpServer::run() {
         }
 
         std::thread([this, csock]() {
+        struct ConnGuard {
+            std::atomic<uint64_t>& n;
+            ~ConnGuard() { n.fetch_sub(1, std::memory_order_relaxed); }
+        } conn_guard{active_connections_};
+        active_connections_.fetch_add(1, std::memory_order_relaxed);
+
         std::string req;
         char buf[4096];
         int n = 0;
@@ -255,6 +261,9 @@ void HttpServer::run() {
             m << "# HELP trading_matching_orders_total Orders submitted.\n"
               << "# TYPE trading_matching_orders_total counter\n"
               << "trading_matching_orders_total " << orders_placed_.load(std::memory_order_relaxed) << "\n"
+              << "# HELP trading_matching_active_connections Active HTTP connections.\n"
+              << "# TYPE trading_matching_active_connections gauge\n"
+              << "trading_matching_active_connections " << active_connections_.load(std::memory_order_relaxed) << "\n"
               << "# HELP trading_matching_trades_total Trades executed.\n"
               << "# TYPE trading_matching_trades_total counter\n"
               << "trading_matching_trades_total " << trades_executed_.load(std::memory_order_relaxed) << "\n"

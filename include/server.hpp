@@ -42,6 +42,7 @@ private:
 
     // Prometheus metrics (atomic; no locks on the matching path).
     std::atomic<uint64_t> orders_placed_{0};
+    std::atomic<uint64_t> active_connections_{0};
     std::atomic<uint64_t> trades_executed_{0};
     std::atomic<uint64_t> cancels_{0};
     std::atomic<uint64_t> errors_{0};
