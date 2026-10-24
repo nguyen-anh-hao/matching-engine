@@ -3,41 +3,57 @@
 #include "order.hpp"
 #include "types.hpp"
 
+#include <cassert>
+#include <cstdint>
+
 namespace exchange {
 
-// FIFO intrusive doubly-linked list of orders resting at a single price level.
-// Head of the list is the order with the earliest time priority.
 class LimitLevel {
 public:
-    void append(Order* o) {
-        o->prev = tail_;
-        o->next = nullptr;
-        if (tail_) {
-            tail_->next = o;
+    LimitLevel() = default;
+
+    LimitLevel(const LimitLevel&) = delete;
+    LimitLevel& operator=(const LimitLevel&) = delete;
+    LimitLevel(LimitLevel&&) = delete;
+    LimitLevel& operator=(LimitLevel&&) = delete;
+
+    void append(Order* order) {
+        assert(order != nullptr);
+        order->prev = tail_;
+        order->next = nullptr;
+        if (tail_ != nullptr) {
+            tail_->next = order;
         } else {
-            head_ = o;
+            head_ = order;
         }
-        tail_ = o;
+        tail_ = order;
         ++count_;
-        total_qty_ += o->leaves;
+        total_qty_ += order->leaves;
     }
 
-    // Remove an order from the level. Subtracts the order's *remaining* leaves.
-    void remove(Order* o) {
-        if (o->prev) o->prev->next = o->next;
-        else head_ = o->next;
-        if (o->next) o->next->prev = o->prev;
-        else tail_ = o->prev;
-        o->prev = o->next = nullptr;
+    void remove(Order* order) {
+        assert(count_ > 0);
+        if (order->prev != nullptr) {
+            order->prev->next = order->next;
+        } else {
+            head_ = order->next;
+        }
+        if (order->next != nullptr) {
+            order->next->prev = order->prev;
+        } else {
+            tail_ = order->prev;
+        }
+        order->prev = nullptr;
+        order->next = nullptr;
         --count_;
-        total_qty_ -= o->leaves;
+        total_qty_ -= order->leaves;
     }
 
-    // Reduce the open quantity of an order that is being filled.
-    void reduce(Order* o, Quantity by) {
+    void reduce(Order* order, Quantity by) {
+        assert(by > 0 && by <= order->leaves);
         total_qty_ -= by;
-        o->leaves -= by;
-        o->executed += by;
+        order->leaves -= by;
+        order->executed += by;
     }
 
     Order* head() const { return head_; }
@@ -45,12 +61,11 @@ public:
     uint32_t count() const { return count_; }
     Quantity total_qty() const { return total_qty_; }
 
-    // Total open quantity at this level excluding orders owned by `id`, used by
-    // the FOK pre-check to stay consistent with self-trade prevention in match().
     Quantity total_qty_excluding(AccountID id) const {
         Quantity sum = 0;
-        for (Order* o = head_; o != nullptr; o = o->next) {
-            if (o->account_id != id) sum += o->leaves;
+        for (const Order* order = head_; order != nullptr; order = order->next) {
+            if (order->account_id != id)
+                sum += order->leaves;
         }
         return sum;
     }
