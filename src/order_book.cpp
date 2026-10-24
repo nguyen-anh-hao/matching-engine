@@ -1,90 +1,87 @@
 #include "order_book.hpp"
 
 #include <algorithm>
-#include <utility>
 
 namespace exchange {
 
-void OrderBook::add(Order* o) {
-    index_[o->id] = o;
-    if (o->side == Side::Buy) {
-        bids_[o->price].append(o);
+void OrderBook::add(Order* order) {
+    if (order->side == Side::Buy) {
+        bids_[order->price].append(order);
     } else {
-        asks_[o->price].append(o);
+        asks_[order->price].append(order);
     }
 }
 
-bool OrderBook::remove(Order* o) {
-    auto it = index_.find(o->id);
-    if (it == index_.end()) return false;
+bool OrderBook::remove(Order* order) {
+    if (order->side == Side::Buy) {
+        const auto level_it = bids_.find(order->price);
+        if (level_it == bids_.end())
+            return false;
+        level_it->second.remove(order);
+        if (level_it->second.empty())
+            bids_.erase(level_it);
+        return true;
+    }
 
-    LimitLevel* level = nullptr;
-    if (o->side == Side::Buy) {
-        auto lit = bids_.find(o->price);
-        if (lit != bids_.end()) level = &lit->second;
-    } else {
-        auto lit = asks_.find(o->price);
-        if (lit != asks_.end()) level = &lit->second;
-    }
-    if (level) level->remove(o);
-    if (level && level->empty()) {
-        if (o->side == Side::Buy) bids_.erase(o->price);
-        else asks_.erase(o->price);
-    }
-    index_.erase(it);
+    const auto level_it = asks_.find(order->price);
+    if (level_it == asks_.end())
+        return false;
+    level_it->second.remove(order);
+    if (level_it->second.empty())
+        asks_.erase(level_it);
     return true;
-}
-
-Order* OrderBook::find(OrderID id) const {
-    auto it = index_.find(id);
-    return it == index_.end() ? nullptr : it->second;
 }
 
 void OrderBook::match(Order* incoming, std::vector<Trade>& trades) {
     const bool is_buy = (incoming->side == Side::Buy);
 
-    // Match against the opposite side using price-time priority, skipping the
-    // incoming account's own resting orders (self-trade prevention).
-    auto match_against = [&](auto& opposite) {
-        auto it = opposite.begin();
-        while (it != opposite.end() && incoming->leaves > 0) {
-            const Price level_price = it->first;
+    const auto match_against = [&](auto& opposite) {
+        auto level_it = opposite.begin();
+        while (level_it != opposite.end() && incoming->leaves > 0) {
             if (incoming->type == OrderType::Limit) {
-                if (is_buy && level_price > incoming->price) break;
-                if (!is_buy && level_price < incoming->price) break;
+                const Price level_price = level_it->first;
+                if (is_buy ? level_price > incoming->price : level_price < incoming->price)
+                    break;
             }
-            LimitLevel& level = it->second;
+
+            LimitLevel& level = level_it->second;
             Order* resting = level.head();
             while (resting != nullptr && incoming->leaves > 0) {
-                Order* next = resting->next; // save before any removal
-                if (resting->account_id != incoming->account_id) {
-                    Quantity match_qty = std::min(incoming->leaves, resting->leaves);
-                    level.reduce(resting, match_qty);
-                    incoming->leaves -= match_qty;
-                    incoming->executed += match_qty;
+                Order* const next = resting->next;
 
-                    trades.push_back(Trade{0,
-                                           incoming->get_symbol(),
-                                           resting->price,
-                                           match_qty,
-                                           resting->id,
-                                           incoming->id,
-                                           resting->account_id,
-                                           incoming->account_id,
-                                           now_ns()});
+                if (resting->account_id == incoming->account_id) {
+                    resting = next;
+                    continue;
+                }
 
-                    if (resting->leaves == 0) {
-                        level.remove(resting);
-                        resting->status = OrderStatus::Filled;
-                        index_.erase(resting->id);
-                    } else {
-                        resting->status = OrderStatus::PartiallyFilled;
-                    }
+                const Quantity match_qty = std::min(incoming->leaves, resting->leaves);
+                level.reduce(resting, match_qty);
+                incoming->leaves -= match_qty;
+                incoming->executed += match_qty;
+
+                Trade trade;
+                trade.price = resting->price;
+                trade.quantity = match_qty;
+                trade.maker_order_id = resting->id;
+                trade.taker_order_id = incoming->id;
+                trade.maker_account_id = resting->account_id;
+                trade.taker_account_id = incoming->account_id;
+                trades.push_back(trade);
+
+                if (resting->leaves == 0) {
+                    level.remove(resting);
+                    resting->status = OrderStatus::Filled;
+                } else {
+                    resting->status = OrderStatus::PartiallyFilled;
                 }
                 resting = next;
             }
-            if (level.empty()) it = opposite.erase(it);
-            else ++it;
+
+            if (level.empty()) {
+                level_it = opposite.erase(level_it);
+            } else {
+                ++level_it;
+            }
         }
     };
 
@@ -95,22 +92,39 @@ void OrderBook::match(Order* incoming, std::vector<Trade>& trades) {
     }
 }
 
-bool OrderBook::can_fill_completely(const Order* o) const {
-    Quantity remaining = o->quantity;
-    if (o->side == Side::Buy) {
-        for (auto it = asks_.begin(); it != asks_.end() && remaining > 0; ++it) {
-            if (o->type == OrderType::Limit && it->first > o->price) break;
-            Quantity avail = it->second.total_qty_excluding(o->account_id);
-            remaining = (avail >= remaining) ? 0 : (remaining - avail);
+bool OrderBook::can_fill_completely(const Order* order) const {
+    Quantity remaining = order->quantity;
+    if (order->side == Side::Buy) {
+        for (auto level_it = asks_.begin(); level_it != asks_.end() && remaining > 0; ++level_it) {
+            if (order->type == OrderType::Limit && level_it->first > order->price)
+                break;
+            const Quantity available = level_it->second.total_qty_excluding(order->account_id);
+            remaining = (available >= remaining) ? 0 : (remaining - available);
         }
     } else {
-        for (auto it = bids_.begin(); it != bids_.end() && remaining > 0; ++it) {
-            if (o->type == OrderType::Limit && it->first < o->price) break;
-            Quantity avail = it->second.total_qty_excluding(o->account_id);
-            remaining = (avail >= remaining) ? 0 : (remaining - avail);
+        for (auto level_it = bids_.begin(); level_it != bids_.end() && remaining > 0; ++level_it) {
+            if (order->type == OrderType::Limit && level_it->first < order->price)
+                break;
+            const Quantity available = level_it->second.total_qty_excluding(order->account_id);
+            remaining = (available >= remaining) ? 0 : (remaining - available);
         }
     }
     return remaining == 0;
+}
+
+bool OrderBook::would_cross(const Order* order) const {
+    if (order->type == OrderType::Market)
+        return true;
+    if (order->side == Side::Buy) {
+        return !asks_.empty() && asks_.begin()->first <= order->price;
+    }
+    return !bids_.empty() && bids_.begin()->first >= order->price;
+}
+
+bool OrderBook::crossed() const {
+    if (bids_.empty() || asks_.empty())
+        return false;
+    return bids_.begin()->first >= asks_.begin()->first;
 }
 
 } // namespace exchange
