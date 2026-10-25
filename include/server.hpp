@@ -1,55 +1,61 @@
 #pragma once
 
+#include "api.hpp"
 #include "engine.hpp"
+#include "net.hpp"
 
-#include <array>
 #include <atomic>
+#include <condition_variable>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 
 namespace exchange {
 
-// Minimal HTTP/JSON server that exposes the matching engine over REST:
-//   POST   /orders             -> place order
-//   DELETE /orders             -> cancel order
-//   GET    /book?symbol&depth  -> L2 snapshot
-//   GET    /ticker?symbol      -> last price + best bid/ask
-//   GET    /health             -> liveness
-//   GET    /metrics            -> Prometheus metrics
-// The transport is intentionally small and dependency-free (raw sockets) so the
-// engine can be dropped into a production C++ stack with cpp-httplib/Crow later.
+// HTTP transport: owns the listener, a bounded connection queue and a bounded
+// worker pool. Request interpretation lives in ApiHandler; the engine itself
+// stays single-writer and is serialized by engine_mutex_.
 class HttpServer {
 public:
-    HttpServer(uint16_t port, MatchingEngine& engine)
-        : port_(port), engine_(engine) {
-        for (auto& b : latency_buckets_) b.store(0, std::memory_order_relaxed);
-    }
+    HttpServer(std::uint16_t port, MatchingEngine& engine);
+    ~HttpServer();
 
-    // Blocking accept loop. Returns when stop() is called from another thread.
-    void run();
+    HttpServer(const HttpServer&) = delete;
+    HttpServer& operator=(const HttpServer&) = delete;
+    HttpServer(HttpServer&&) = delete;
+    HttpServer& operator=(HttpServer&&) = delete;
 
-    void stop() { running_ = false; }
+    // Blocking accept loop. Returns false when the listener cannot be created.
+    // Returns true after stop() has drained the worker pool. run() must be
+    // joined before this object is destroyed.
+    bool run();
+
+    // Thread-safe; the accept loop observes it within one select timeout.
+    void stop();
 
 private:
-    uint16_t port_;
+    void worker_loop();
+    void handle_connection(net::socket_t client);
+
+    std::uint16_t port_;
     MatchingEngine& engine_;
-    volatile bool running_ = true;
-    intptr_t listen_fd_ = -1;
+    std::atomic<bool> running_{true};
 
-    // The matching core is single-threaded by design; this mutex serializes
-    // access to it while HTTP I/O runs concurrently.
+    // Serializes access to the engine while HTTP I/O runs concurrently.
     std::mutex engine_mutex_;
+    Metrics metrics_;
+    ApiHandler api_;
 
-    // Prometheus metrics (atomic; no locks on the matching path).
-    std::atomic<uint64_t> orders_placed_{0};
-    std::atomic<uint64_t> active_connections_{0};
-    std::atomic<uint64_t> trades_executed_{0};
-    std::atomic<uint64_t> cancels_{0};
-    std::atomic<uint64_t> errors_{0};
-    std::atomic<uint64_t> latency_sum_ns_{0};
-    std::atomic<uint64_t> latency_count_{0};
-    static constexpr size_t kLatencyBuckets = 13;
-    std::array<std::atomic<uint64_t>, kLatencyBuckets> latency_buckets_{};
+    // Bounded connection queue between the accept loop and the worker pool.
+    static constexpr size_t kMaxQueuedConnections = 1024;
+    static constexpr size_t kMinWorkers = 2;
+    static constexpr size_t kMaxWorkers = 8;
+
+    std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    std::deque<net::socket_t> queue_;
+    bool stopping_ = false;
 };
 
 } // namespace exchange
