@@ -1,200 +1,252 @@
 #include "engine.hpp"
 
+#include "wide_math.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <string>
+#include <utility>
+#include <vector>
+
 namespace exchange {
+namespace {
 
-MatchingEngine::MatchingEngine() = default;
-
-OrderBook& MatchingEngine::book_for(const std::string& symbol) {
-    auto it = books_.find(symbol);
-    if (it == books_.end()) {
-        it = books_.emplace(symbol, OrderBook(symbol)).first;
-    }
-    return it->second;
+PlaceResult rejection(std::string reason) {
+    PlaceResult result;
+    result.status = OrderStatus::Rejected;
+    result.reason = std::move(reason);
+    return result;
 }
 
-PlaceResult MatchingEngine::place_order(const OrderRequest& req) {
-    PlaceResult result;
-    result.order_id = next_order_id();
-
-    // Validate.
-    if (req.quantity <= 0) {
-        result.reject_reason = "quantity must be positive";
-        result.status = OrderStatus::Rejected;
-        return result;
+// Average execution price of the incoming order. All trades in the vector were
+// produced by this order, so the notional is simply the sum of all fills.
+Price average_price(const std::vector<Trade>& trades, Quantity executed) {
+    if (executed <= 0)
+        return 0;
+    NotionalSum notional;
+    for (const Trade& trade : trades) {
+        notional.add(trade.price, trade.quantity);
     }
-    if (req.type == OrderType::Limit && req.price <= 0) {
-        result.reject_reason = "limit price must be positive";
-        result.status = OrderStatus::Rejected;
-        return result;
+    return notional.divide_by(executed);
+}
+
+} // namespace
+
+PlaceResult MatchingEngine::place_order(const OrderRequest& request) {
+    if (!is_valid_symbol(request.symbol)) {
+        return rejection("invalid symbol");
+    }
+    if (request.account_id == 0) {
+        return rejection("account_id must be non-zero");
+    }
+    if (request.quantity <= 0) {
+        return rejection("quantity must be positive");
+    }
+    if (request.type == OrderType::Limit && request.price <= 0) {
+        return rejection("limit price must be positive");
     }
 
-    // Allocate the incoming order from the pool (no malloc on the hot path).
-    Order* incoming = pool_.acquire();
-    incoming->id = result.order_id;
-    incoming->account_id = req.account_id;
-    incoming->set_symbol(req.symbol);
-    incoming->price = req.price;
-    incoming->quantity = req.quantity;
-    incoming->leaves = req.quantity;
-    incoming->executed = 0;
-    incoming->side = req.side;
-    incoming->type = req.type;
-    incoming->tif = req.tif;
-    incoming->status = OrderStatus::New;
+    auto book_it = books_.find(request.symbol);
+    if (book_it == books_.end()) {
+        if (books_.size() >= kMaxBookSymbols) {
+            return rejection("symbol limit reached");
+        }
+        book_it = books_.try_emplace(request.symbol).first;
+    }
+    OrderBook& book = book_it->second;
+
+    Order* const incoming = pool_.acquire();
+    incoming->id = next_order_id();
+    incoming->account_id = request.account_id;
+    incoming->set_symbol(request.symbol);
+    incoming->price = request.price;
+    incoming->quantity = request.quantity;
+    incoming->leaves = request.quantity;
+    incoming->side = request.side;
+    incoming->type = request.type;
+    incoming->tif = request.tif;
     incoming->sequence = ++sequence_;
 
-    OrderBook& book = book_for(req.symbol);
+    PlaceResult result;
+    result.order_id = incoming->id;
 
-    // FOK pre-check: must be fully fillable immediately or it is killed.
-    if (req.tif == TimeInForce::FOK && !book.can_fill_completely(incoming)) {
-        result.reject_reason = "FOK: insufficient liquidity for full fill";
-        result.status = OrderStatus::Cancelled;
+    if (request.tif == TimeInForce::FOK && !book.can_fill_completely(incoming)) {
         pool_.release(incoming);
+        result.status = OrderStatus::Cancelled;
+        result.reason = "FOK: insufficient liquidity for a complete fill";
         return result;
     }
 
-    // Perform matching against the resting book.
+    const int64_t timestamp_ns = now_ns();
     book.match(incoming, result.trades);
 
-    // Assign trade ids (timestamps were set during match).
-    for (Trade& t : result.trades) {
-        t.id = next_trade_id();
+    for (Trade& trade : result.trades) {
+        trade.id = next_trade_id();
+        trade.symbol = request.symbol;
+        trade.timestamp_ns = timestamp_ns;
     }
     if (!result.trades.empty()) {
-        last_prices_[req.symbol] = result.trades.back().price;
+        last_prices_[request.symbol] = result.trades.back().price;
     }
 
-    // Compute the average fill price for this order (__int128 avoids overflow).
-    if (incoming->executed > 0) {
-        __int128 notional = 0;
-        for (const Trade& t : result.trades) {
-            if (t.taker_order_id == incoming->id) {
-                notional += static_cast<__int128>(t.price) * t.quantity;
-            }
-        }
-        result.average_price = static_cast<Price>(notional / incoming->executed);
-    }
+    result.average_price = average_price(result.trades, incoming->executed);
+    release_filled_makers(result.trades);
+    finalize_order(incoming, book, result);
+    return result;
+}
 
-    // Remove resting orders that became fully filled and recycle their memory.
-    for (const Trade& t : result.trades) {
-        if (t.maker_order_id == incoming->id) continue;
-        auto mit = order_index_.find(t.maker_order_id);
-        if (mit != order_index_.end()) {
-            Order* mo = mit->second;
-            if (mo->status == OrderStatus::Filled) {
-                order_index_.erase(mit);
-                pool_.release(mo);
-            }
-        }
-    }
+void MatchingEngine::release_filled_makers(const std::vector<Trade>& trades) {
+    for (const Trade& trade : trades) {
+        const auto index_it = order_index_.find(trade.maker_order_id);
+        if (index_it == order_index_.end())
+            continue;
 
-    // Determine the incoming order's final state.
+        Order* const maker = index_it->second;
+        if (maker->status != OrderStatus::Filled)
+            continue;
+
+        order_index_.erase(index_it);
+        pool_.release(maker);
+    }
+}
+
+void MatchingEngine::finalize_order(Order* incoming, OrderBook& book, PlaceResult& result) {
+    result.executed = incoming->executed;
+    result.leaves = incoming->leaves;
+    result.accepted = incoming->executed > 0;
+
     if (incoming->leaves == 0) {
         incoming->status = OrderStatus::Filled;
         result.accepted = true;
         result.status = OrderStatus::Filled;
         pool_.release(incoming);
-    } else if (incoming->type == OrderType::Market) {
-        // A market order cannot rest; leftover leaves means no liquidity.
-        incoming->status = OrderStatus::Rejected;
-        result.accepted = (incoming->executed > 0);
-        result.reject_reason = "market order: insufficient liquidity";
-        result.status = OrderStatus::Rejected;
-        pool_.release(incoming);
-    } else if (incoming->tif == TimeInForce::IOC || incoming->tif == TimeInForce::FOK) {
-        // Cancel the remainder of IOC/FOK orders.
-        incoming->status = OrderStatus::Cancelled;
-        result.accepted = (incoming->executed > 0);
-        result.status = OrderStatus::Cancelled;
-        pool_.release(incoming);
-    } else {
-        // GTC limit order: rest the remaining quantity in the book.
-        incoming->status = (incoming->executed > 0) ? OrderStatus::PartiallyFilled : OrderStatus::New;
-        result.accepted = true;
-        result.status = incoming->status;
-        book.add(incoming);
-        order_index_[incoming->id] = incoming;
+        return;
     }
 
-    return result;
+    if (incoming->type == OrderType::Market) {
+        incoming->status = (incoming->executed > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
+        result.status = incoming->status;
+        result.reason = "market order: no further liquidity";
+        pool_.release(incoming);
+        return;
+    }
+
+    if (incoming->tif != TimeInForce::GTC) {
+        incoming->status = (incoming->executed > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
+        result.status = incoming->status;
+        result.reason =
+            (incoming->tif == TimeInForce::IOC) ? "IOC: remainder cancelled" : "FOK: remainder cancelled";
+        pool_.release(incoming);
+        return;
+    }
+
+    if (book.would_cross(incoming)) {
+        incoming->status = (incoming->executed > 0) ? OrderStatus::PartiallyFilled : OrderStatus::Cancelled;
+        result.status = incoming->status;
+        result.reason = "self-trade prevention: remainder would cross own resting liquidity";
+        pool_.release(incoming);
+        return;
+    }
+
+    incoming->status = (incoming->executed > 0) ? OrderStatus::PartiallyFilled : OrderStatus::New;
+    result.accepted = true;
+    result.status = incoming->status;
+
+    book.add(incoming);
+    order_index_.emplace(incoming->id, incoming);
+    assert(!book.crossed());
 }
 
 bool MatchingEngine::cancel_order(OrderID order_id, const std::string& symbol) {
-    auto it = order_index_.find(order_id);
-    if (it == order_index_.end()) return false;
-    Order* o = it->second;
-    if (o->get_symbol() != symbol) return false;
+    const auto index_it = order_index_.find(order_id);
+    if (index_it == order_index_.end())
+        return false;
 
-    OrderBook& book = book_for(symbol);
-    book.remove(o);
-    order_index_.erase(it);
-    o->status = OrderStatus::Cancelled;
-    pool_.release(o);
+    Order* const order = index_it->second;
+    if (!order->matches_symbol(symbol))
+        return false;
+
+    const auto book_it = books_.find(symbol);
+    if (book_it == books_.end())
+        return false;
+    if (!book_it->second.remove(order))
+        return false;
+
+    order_index_.erase(index_it);
+    order->status = OrderStatus::Cancelled;
+    pool_.release(order);
     return true;
 }
 
 OrderBookSnapshot MatchingEngine::snapshot(const std::string& symbol, uint32_t depth) const {
-    OrderBookSnapshot snap;
-    snap.symbol = symbol;
-    snap.sequence = sequence_;
-    snap.timestamp_ns = now_ns();
+    OrderBookSnapshot snapshot;
+    snapshot.symbol = symbol;
+    snapshot.sequence = sequence_;
+    snapshot.timestamp_ns = now_ns();
 
-    auto it = books_.find(symbol);
-    if (it == books_.end()) return snap;
+    const auto book_it = books_.find(symbol);
+    if (book_it == books_.end())
+        return snapshot;
 
-    const OrderBook& book = it->second;
-    uint32_t n = 0;
-    for (const auto& [price, level] : book.bids()) {
-        if (depth != 0 && n >= depth) break;
-        snap.bids.push_back(PriceLevel{price, level.total_qty(), level.count()});
-        ++n;
-    }
-    n = 0;
-    for (const auto& [price, level] : book.asks()) {
-        if (depth != 0 && n >= depth) break;
-        snap.asks.push_back(PriceLevel{price, level.total_qty(), level.count()});
-        ++n;
-    }
-    return snap;
+    const auto append_levels = [depth](const auto& levels, std::vector<PriceLevel>& out) {
+        for (const auto& [price, level] : levels) {
+            if (depth != 0 && out.size() >= depth)
+                break;
+            out.push_back(PriceLevel{price, level.total_qty(), level.count()});
+        }
+    };
+    append_levels(book_it->second.bids(), snapshot.bids);
+    append_levels(book_it->second.asks(), snapshot.asks);
+    return snapshot;
 }
 
 Ticker MatchingEngine::ticker(const std::string& symbol) const {
-    Ticker t;
-    t.symbol = symbol;
-    auto lit = last_prices_.find(symbol);
-    if (lit != last_prices_.end()) t.last_price = lit->second;
+    Ticker ticker;
+    ticker.symbol = symbol;
 
-    auto bit = books_.find(symbol);
-    if (bit != books_.end()) {
-        if (!bit->second.bids().empty()) t.best_bid = bit->second.bids().begin()->first;
-        if (!bit->second.asks().empty()) t.best_ask = bit->second.asks().begin()->first;
+    const auto price_it = last_prices_.find(symbol);
+    if (price_it != last_prices_.end())
+        ticker.last_price = price_it->second;
+
+    const auto book_it = books_.find(symbol);
+    if (book_it != books_.end()) {
+        const OrderBook& book = book_it->second;
+        if (!book.bids().empty())
+            ticker.best_bid = book.bids().begin()->first;
+        if (!book.asks().empty())
+            ticker.best_ask = book.asks().begin()->first;
     }
-    return t;
+    return ticker;
 }
 
 std::vector<OrderSnapshot> MatchingEngine::open_orders(const std::string& symbol) const {
-    std::vector<OrderSnapshot> out;
-    for (const auto& [id, o] : order_index_) {
-        (void)id;
-        if (!symbol.empty() && o->get_symbol() != symbol) continue;
-        if (o->status != OrderStatus::New && o->status != OrderStatus::PartiallyFilled) continue;
+    std::vector<OrderSnapshot> orders;
+    for (const auto& entry : order_index_) {
+        const Order* const order = entry.second;
+        if (!symbol.empty() && !order->matches_symbol(symbol))
+            continue;
+        if (order->status != OrderStatus::New && order->status != OrderStatus::PartiallyFilled) {
+            continue;
+        }
 
-        OrderSnapshot s;
-        s.id = o->id;
-        s.account_id = o->account_id;
-        s.symbol = o->get_symbol();
-        s.side = o->side;
-        s.type = o->type;
-        s.price = o->price;
-        s.quantity = o->quantity;
-        s.executed = o->executed;
-        s.leaves = o->leaves;
-        s.status = o->status;
-        s.sequence = o->sequence;
-        out.push_back(s);
+        OrderSnapshot snapshot;
+        snapshot.id = order->id;
+        snapshot.account_id = order->account_id;
+        snapshot.symbol = std::string(order->symbol_view());
+        snapshot.side = order->side;
+        snapshot.type = order->type;
+        snapshot.price = order->price;
+        snapshot.quantity = order->quantity;
+        snapshot.executed = order->executed;
+        snapshot.leaves = order->leaves;
+        snapshot.status = order->status;
+        snapshot.sequence = order->sequence;
+        orders.push_back(std::move(snapshot));
     }
-    return out;
+
+    std::sort(orders.begin(), orders.end(),
+              [](const OrderSnapshot& lhs, const OrderSnapshot& rhs) { return lhs.sequence < rhs.sequence; });
+    return orders;
 }
 
 } // namespace exchange
-
