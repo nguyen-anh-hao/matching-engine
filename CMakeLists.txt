@@ -50,8 +50,12 @@ endif()
 
 add_library(engine_core
     src/engine.cpp
+    src/engine_queries.cpp
     src/fixed_point.cpp
     src/order_book.cpp
+    src/order_lifecycle.cpp
+    src/order_validation.cpp
+    src/trade_posting.cpp
 )
 target_include_directories(engine_core PUBLIC include)
 target_link_libraries(engine_core PUBLIC engine_build_flags)
@@ -86,6 +90,10 @@ engine_add_test(unit_test_queries tests/unit_test_queries.cpp)
 engine_add_test(unit_test_tif tests/unit_test_tif.cpp)
 engine_add_test(unit_test_stp tests/unit_test_stp.cpp)
 engine_add_test(unit_test_fixed_point tests/unit_test_fixed_point.cpp)
+engine_add_test(unit_test_engine_internals tests/unit_test_engine_internals.cpp)
+# The internals tests exercise the private helpers that live next to the engine
+# sources, so they need the src directory on their include path.
+target_include_directories(unit_test_engine_internals PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 engine_add_test(unit_test_json tests/unit_test_json.cpp src/json.cpp)
 engine_add_test(unit_test_http tests/unit_test_http.cpp src/http.cpp src/net.cpp)
 if(WIN32)
