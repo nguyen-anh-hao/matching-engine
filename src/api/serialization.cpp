@@ -9,7 +9,10 @@
 namespace exchange::api_detail {
 
 std::string json_error(std::string_view code) {
-    return "{\"error\":\"" + json::escape(code) + "\"}";
+    std::string out = "{\"error\":\"";
+    out += json::escape(code);
+    out += "\"}";
+    return out;
 }
 
 std::string error_body(int status) {
@@ -36,7 +39,12 @@ std::string error_body(int status) {
 }
 
 std::string quote(std::string_view text) {
-    return "\"" + json::escape(text) + "\"";
+    std::string out;
+    out.reserve(text.size() + 2);
+    out.push_back('"');
+    out += json::escape(text);
+    out.push_back('"');
+    return out;
 }
 
 std::optional<uint64_t> parse_u64(std::string_view text) {
@@ -122,8 +130,11 @@ std::string levels_to_json(const std::vector<PriceLevel>& levels) {
     for (size_t i = 0; i < levels.size(); ++i) {
         if (i != 0)
             out += ',';
-        out +=
-            "[" + quote(format_fixed(levels[i].price)) + "," + quote(format_fixed(levels[i].quantity)) + "]";
+        out += '[';
+        out += quote(format_fixed(levels[i].price));
+        out += ',';
+        out += quote(format_fixed(levels[i].quantity));
+        out += ']';
     }
     out += ']';
     return out;
