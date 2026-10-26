@@ -39,7 +39,6 @@ private:
     void handle_connection(net::socket_t client);
 
     std::uint16_t port_;
-    MatchingEngine& engine_;
     std::atomic<bool> running_{true};
 
     // Serializes access to the engine while HTTP I/O runs concurrently.

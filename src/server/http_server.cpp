@@ -13,7 +13,7 @@
 namespace exchange {
 
 HttpServer::HttpServer(std::uint16_t port, MatchingEngine& engine)
-    : port_(port), engine_(engine), metrics_(), api_(engine, engine_mutex_, metrics_) {}
+    : port_(port), metrics_(), api_(engine, engine_mutex_, metrics_) {}
 
 HttpServer::~HttpServer() {
     stop();
