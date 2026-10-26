@@ -4,6 +4,27 @@
 
 The deterministic order matching core: it maintains the live limit order book per symbol and turns incoming orders into trades. It is the only stateful service by design, because the book itself is the authoritative state. It has no database, no disk writes and no durable history of its own.
 
+## Repository layout
+
+The code is split into one-way layers. A layer may only include headers of the layers below it, and the CMake targets encode that boundary.
+
+```
+include/exchange/
+  core/        domain types, order book and matching engine (no I/O, no logging)
+  text/        fixed-point and JSON helpers
+  net/         socket and HTTP framing primitives
+  api/         request handling, serialization and metrics
+  server/      HTTP transport runtime (connection queue and worker pool)
+src/           implementation of the same layers; private headers stay next to their sources
+tests/
+  unit/        core, text and net suites
+  support/     shared fixtures
+  integration/ HTTP smoke test
+benchmarks/    matching throughput benchmark
+```
+
+`exchange_core` depends on nothing, `exchange_text` and `exchange_net` are self-contained, `exchange_api` builds on core and text, and `exchange_server` plus the `matching-engine` executable form the composition root. `ENGINE_BUILD_TESTS` and `ENGINE_BUILD_BENCHMARKS` default to ON locally; the container build turns both off.
+
 ## Domain knowledge
 
 Prices and quantities are signed 64-bit fixed-point integers scaled by one hundred million, so price comparison is an integer comparison and rounding never enters the matching path. Orders match best price first and, within a price level, oldest first, which is strict price-time priority. A limit order never trades through its limit, while a market order accepts any available price.

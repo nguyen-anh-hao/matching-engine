@@ -1,0 +1,2 @@
+add_executable(benchmark_matching benchmark_matching.cpp)
+target_link_libraries(benchmark_matching PRIVATE exchange_core)

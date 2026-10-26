@@ -35,7 +35,7 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
       - name: HTTP smoke test
-        run: bash tests/http_smoke_test.sh ./build/matching-engine
+        run: bash tests/integration/http_smoke_test.sh ./build/src/matching-engine
 
   windows:
     runs-on: windows-latest

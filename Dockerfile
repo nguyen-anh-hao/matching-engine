@@ -7,6 +7,7 @@ RUN apt-get update \
 
 COPY . .
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENGINE_WARNINGS_AS_ERRORS=ON \
+    -DENGINE_BUILD_TESTS=OFF -DENGINE_BUILD_BENCHMARKS=OFF \
     && cmake --build build -j"$(nproc)"
 
 FROM debian:bookworm-slim
@@ -17,7 +18,7 @@ RUN apt-get update \
     && useradd --system --gid exchange --no-create-home exchange
 
 WORKDIR /app
-COPY --from=build /app/build/matching-engine /usr/local/bin/matching-engine
+COPY --from=build /app/build/src/matching-engine /usr/local/bin/matching-engine
 
 USER exchange
 EXPOSE 9001

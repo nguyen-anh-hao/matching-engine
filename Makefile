@@ -30,16 +30,16 @@ build: configure ## Compile the engine
 	$(CMAKE) --build $(BUILD_DIR) -j
 
 run: build ## Run the engine on $(PORT)
-	./$(BUILD_DIR)/matching-engine $(PORT)
+	./$(BUILD_DIR)/src/matching-engine $(PORT)
 
 test: build ## Run unit tests
 	$(CTEST) --test-dir $(BUILD_DIR) --output-on-failure
 
 smoke: build ## Run the HTTP end-to-end smoke test
-	bash tests/http_smoke_test.sh ./$(BUILD_DIR)/matching-engine
+	bash tests/integration/http_smoke_test.sh ./$(BUILD_DIR)/src/matching-engine
 
 bench: build ## Run the matching benchmark
-	./$(BUILD_DIR)/benchmark_matching
+	./$(BUILD_DIR)/benchmarks/benchmark_matching
 
 lint: ## Check source formatting with clang-format
 	@command -v $(FORMAT) >/dev/null 2>&1 || { echo "$(FORMAT) not found"; exit 1; }
